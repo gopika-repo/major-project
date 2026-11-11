@@ -1,0 +1,30 @@
+# Environment variables and secrets
+.env
+.env.*
+!.env.example
+
+# Python virtual environments
+venv/
+.venv/
+env/
+
+# Python cache files
+__pycache__/
+**/__pycache__/
+*.pyc
+*.pyo
+
+# Node dependencies and generated files
+node_modules/
+dist/
+build/
+.next/
+
+# Local Qdrant database storage
+qdrant_storage/
+
+# Editor and OS files
+.vscode/
+.DS_Store
+Thumbs.db
+backend/data/uploads/
