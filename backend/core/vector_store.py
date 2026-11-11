@@ -1,8 +1,14 @@
+
 import logging
 import sys
 import os
 
-sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from uuid import NAMESPACE_URL, uuid5
+
+sys.path.insert(
+    0,
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+)
 
 from qdrant_client import QdrantClient
 from qdrant_client.models import (
@@ -13,7 +19,9 @@ from qdrant_client.models import (
     FieldCondition,
     MatchValue
 )
+
 from config import settings
+
 
 logger = logging.getLogger(__name__)
 
@@ -21,7 +29,9 @@ logger = logging.getLogger(__name__)
 class VectorStore:
     """
     Handles storing and searching vectors in Qdrant.
-    Qdrant runs locally on your machine — no cloud needed.
+
+    Qdrant runs locally on your machine.
+    Supports text and table chunks with unique point IDs.
     """
 
     def __init__(self):
@@ -34,11 +44,18 @@ class VectorStore:
         Connects to local Qdrant database.
         Creates the storage folder if it doesn't exist.
         """
+
         try:
             os.makedirs(settings.QDRANT_PATH, exist_ok=True)
 
-            self.client = QdrantClient(path=settings.QDRANT_PATH)
-            logger.info(f"Connected to Qdrant at {settings.QDRANT_PATH} ✅")
+            self.client = QdrantClient(
+                path=settings.QDRANT_PATH
+            )
+
+            logger.info(
+                f"Connected to Qdrant at "
+                f"{settings.QDRANT_PATH} ✅"
+            )
 
             self._ensure_collection()
 
@@ -51,12 +68,14 @@ class VectorStore:
         Creates the vector collection if it doesn't exist.
         A collection is like a table in a database.
         """
+
         existing = [
             c.name
             for c in self.client.get_collections().collections
         ]
 
         if self.collection_name not in existing:
+
             self.client.create_collection(
                 collection_name=self.collection_name,
                 vectors_config=VectorParams(
@@ -64,22 +83,90 @@ class VectorStore:
                     distance=Distance.COSINE
                 )
             )
-            logger.info(f"Created collection: {self.collection_name}")
+
+            logger.info(
+                f"Created collection: {self.collection_name}"
+            )
+
         else:
-            logger.info(f"Using existing collection: {self.collection_name}")
+
+            logger.info(
+                f"Using existing collection: "
+                f"{self.collection_name}"
+            )
+
+    @staticmethod
+    def _make_point_id(chunk):
+        """
+        Generates a stable and unique UUID for each Qdrant point.
+
+        Same document + same chunk + same type = same ID.
+
+        Different documents or different chunk types = different IDs.
+
+        This prevents text chunks and table chunks from
+        accidentally overwriting each other.
+        """
+
+        metadata = chunk.get("metadata", {})
+
+        doc_name = metadata.get("doc_name")
+        chunk_key = chunk.get("id")
+        chunk_type = metadata.get("type") or "text"
+
+        if not doc_name:
+            raise ValueError(
+                "Chunk metadata must contain doc_name"
+            )
+
+        if not chunk_key:
+            raise ValueError(
+                "Every chunk must contain a unique id"
+            )
+
+        unique_key = (
+            f"visual-financial-analyst:"
+            f"{doc_name}:"
+            f"{chunk_type}:"
+            f"{chunk_key}"
+        )
+
+        point_id = uuid5(
+            NAMESPACE_URL,
+            unique_key
+        )
+
+        return str(point_id)
 
     def upsert_chunks(self, chunks):
         """
         Stores a list of chunks into Qdrant.
-        Each chunk has: id, text, embedding, metadata.
-        Returns number of vectors stored.
+
+        Each chunk contains:
+            id
+            text
+            embedding
+            metadata
+
+        Returns:
+            Number of vectors stored.
         """
+
         try:
+
+            if not chunks:
+                logger.warning("No chunks received for storage.")
+                return 0
+
             points = []
 
-            for i, chunk in enumerate(chunks):
+            for chunk in chunks:
+
+                # Generate stable unique Qdrant ID.
+                point_id = self._make_point_id(chunk)
+
                 point = PointStruct(
-                    id=i,
+                    id=point_id,
                     vector=chunk["embedding"],
                     payload={
                         **chunk["metadata"],
@@ -87,38 +174,51 @@ class VectorStore:
                         "chunk_id": chunk["id"]
                     }
                 )
+
                 points.append(point)
 
-            # Store in batches of 50
+            # Store in batches of 50.
             batch_size = 50
             total = 0
 
             for i in range(0, len(points), batch_size):
+
                 batch = points[i:i + batch_size]
+
                 self.client.upsert(
                     collection_name=self.collection_name,
                     points=batch
                 )
+
                 total += len(batch)
-                logger.info(f"Stored {total}/{len(points)} vectors")
+
+                logger.info(
+                    f"Stored {total}/{len(points)} vectors"
+                )
 
             return total
 
         except Exception as e:
+
             logger.error(f"Upsert failed: {e}")
             raise
 
     def query(self, embedding, top_k=5, filter_dict=None):
         """
         Searches Qdrant for the most similar vectors.
+
         Returns top_k most relevant chunks.
         """
+
         try:
-            # Build filter if doc_name provided
+
+            # Build filter if doc_name is provided.
             qdrant_filter = None
 
             if filter_dict and "doc_name" in filter_dict:
+
                 val = filter_dict["doc_name"]
+
                 if isinstance(val, dict):
                     doc_name = val.get("$eq")
                 else:
@@ -133,7 +233,7 @@ class VectorStore:
                     ]
                 )
 
-            # query_points is the new method in latest qdrant-client
+            # Use query_points from latest qdrant-client.
             results = self.client.query_points(
                 collection_name=self.collection_name,
                 query=embedding,
@@ -156,15 +256,19 @@ class VectorStore:
             ]
 
         except Exception as e:
+
             logger.error(f"Query failed: {e}")
             raise
 
     def delete_document(self, doc_name):
         """
         Deletes all vectors belonging to one document.
+
         Used when re-uploading the same document.
         """
+
         try:
+
             self.client.delete(
                 collection_name=self.collection_name,
                 points_selector=Filter(
@@ -176,23 +280,37 @@ class VectorStore:
                     ]
                 )
             )
-            logger.info(f"Deleted vectors for: {doc_name}")
+
+            logger.info(
+                f"Deleted vectors for: {doc_name}"
+            )
 
         except Exception as e:
+
             logger.error(f"Delete failed: {e}")
             raise
 
     def get_stats(self):
-        """Returns basic stats about the collection."""
+        """
+        Returns basic statistics about the Qdrant collection.
+        """
+
         try:
-            info = self.client.get_collection(self.collection_name)
+
+            info = self.client.get_collection(
+                self.collection_name
+            )
+
             return {
                 "total_vectors": info.points_count,
                 "collection_name": self.collection_name,
                 "dimensions": settings.EMBED_DIMENSIONS
             }
+
         except Exception as e:
+
             logger.error(f"Stats failed: {e}")
+
             return {
                 "total_vectors": 0,
                 "collection_name": self.collection_name,
@@ -201,19 +319,26 @@ class VectorStore:
 
 
 if __name__ == "__main__":
+
     logging.basicConfig(level=logging.INFO)
+
     import random
 
     print("=== Qdrant VectorStore Test ===\n")
+
     vs = VectorStore()
 
     stats = vs.get_stats()
+
     print(f"Collection : {stats['collection_name']}")
     print(f"Dimensions : {stats['dimensions']}")
     print(f"Vectors    : {stats['total_vectors']}")
 
-    # Test with fake vector of correct dimension
-    fake_vector = [random.uniform(-1, 1) for _ in range(3072)]
+    # Test with fake vector of correct dimension.
+    fake_vector = [
+        random.uniform(-1, 1)
+        for _ in range(settings.EMBED_DIMENSIONS)
+    ]
 
     fake_chunk = [{
         "id": "test_p1_c0",
@@ -229,18 +354,26 @@ if __name__ == "__main__":
     }]
 
     count = vs.upsert_chunks(fake_chunk)
+
     print(f"\nUpserted {count} test vector ✅")
 
     results = vs.query(
         fake_vector,
         top_k=1,
-        filter_dict={"doc_name": {"$eq": "test_doc"}}
+        filter_dict={
+            "doc_name": {
+                "$eq": "test_doc"
+            }
+        }
     )
 
     print(f"Query returned {len(results)} result")
-    print(f"Score : {results[0]['score']}")
-    print(f"Text  : {results[0]['text']}")
+
+    if results:
+        print(f"Score : {results[0]['score']}")
+        print(f"Text  : {results[0]['text']}")
 
     vs.delete_document("test_doc")
+
     print("\nTest vector deleted ✅")
     print("\nQdrant VectorStore working ✅")
