@@ -30,8 +30,7 @@ class VectorStore:
     """
     Handles storing and searching vectors in Qdrant.
 
-    Qdrant runs locally on your machine.
-    Supports text and table chunks with unique point IDs.
+    Supports text and financial table chunks.
     """
 
     def __init__(self):
@@ -40,10 +39,7 @@ class VectorStore:
         self.connect()
 
     def connect(self):
-        """
-        Connects to local Qdrant database.
-        Creates the storage folder if it doesn't exist.
-        """
+        """Connect to the local Qdrant database."""
 
         try:
             os.makedirs(settings.QDRANT_PATH, exist_ok=True)
@@ -53,8 +49,7 @@ class VectorStore:
             )
 
             logger.info(
-                f"Connected to Qdrant at "
-                f"{settings.QDRANT_PATH} ✅"
+                f"Connected to Qdrant at {settings.QDRANT_PATH}"
             )
 
             self._ensure_collection()
@@ -64,14 +59,11 @@ class VectorStore:
             raise
 
     def _ensure_collection(self):
-        """
-        Creates the vector collection if it doesn't exist.
-        A collection is like a table in a database.
-        """
+        """Create the collection if it does not exist."""
 
         existing = [
-            c.name
-            for c in self.client.get_collections().collections
+            collection.name
+            for collection in self.client.get_collections().collections
         ]
 
         if self.collection_name not in existing:
@@ -89,23 +81,16 @@ class VectorStore:
             )
 
         else:
-
             logger.info(
-                f"Using existing collection: "
-                f"{self.collection_name}"
+                f"Using existing collection: {self.collection_name}"
             )
 
     @staticmethod
     def _make_point_id(chunk):
         """
-        Generates a stable and unique UUID for each Qdrant point.
+        Generate a stable, unique UUID for each chunk.
 
-        Same document + same chunk + same type = same ID.
-
-        Different documents or different chunk types = different IDs.
-
-        This prevents text chunks and table chunks from
-        accidentally overwriting each other.
+        Different documents and chunk types get different IDs.
         """
 
         metadata = chunk.get("metadata", {})
@@ -131,38 +116,24 @@ class VectorStore:
             f"{chunk_key}"
         )
 
-        point_id = uuid5(
-            NAMESPACE_URL,
-            unique_key
+        return str(
+            uuid5(NAMESPACE_URL, unique_key)
         )
 
-        return str(point_id)
-
     def upsert_chunks(self, chunks):
-        """
-        Stores a list of chunks into Qdrant.
-
-        Each chunk contains:
-            id
-            text
-            embedding
-            metadata
-
-        Returns:
-            Number of vectors stored.
-        """
+        """Store chunks and their embeddings in Qdrant."""
 
         try:
-
             if not chunks:
-                logger.warning("No chunks received for storage.")
+                logger.warning(
+                    "No chunks received for storage."
+                )
                 return 0
 
             points = []
 
             for chunk in chunks:
 
-                # Generate stable unique Qdrant ID.
                 point_id = self._make_point_id(chunk)
 
                 point = PointStruct(
@@ -177,7 +148,6 @@ class VectorStore:
 
                 points.append(point)
 
-            # Store in batches of 50.
             batch_size = 50
             total = 0
 
@@ -199,41 +169,94 @@ class VectorStore:
             return total
 
         except Exception as e:
-
             logger.error(f"Upsert failed: {e}")
             raise
 
+    @staticmethod
+    def _build_filter(filter_dict=None):
+        """
+        Build a Qdrant filter from equality and inequality conditions.
+
+        Supported examples:
+
+        {"doc_name": {"$eq": "infosys-ar-24"}}
+
+        {"type": {"$eq": "table"}}
+
+        {"type": {"$ne": "table"}}
+
+        Multiple conditions are combined.
+        """
+
+        if not filter_dict:
+            return None
+
+        must_conditions = []
+        must_not_conditions = []
+
+        for field, condition in filter_dict.items():
+
+            if isinstance(condition, dict):
+
+                if "$eq" in condition:
+
+                    value = condition["$eq"]
+
+                    must_conditions.append(
+                        FieldCondition(
+                            key=field,
+                            match=MatchValue(value=value)
+                        )
+                    )
+
+                elif "$ne" in condition:
+
+                    value = condition["$ne"]
+
+                    must_not_conditions.append(
+                        FieldCondition(
+                            key=field,
+                            match=MatchValue(value=value)
+                        )
+                    )
+
+                else:
+                    raise ValueError(
+                        f"Unsupported filter operator for {field}. "
+                        "Use $eq or $ne."
+                    )
+
+            else:
+
+                must_conditions.append(
+                    FieldCondition(
+                        key=field,
+                        match=MatchValue(value=condition)
+                    )
+                )
+
+        if not must_conditions and not must_not_conditions:
+            return None
+
+        return Filter(
+            must=must_conditions or None,
+            must_not=must_not_conditions or None
+        )
+
     def query(self, embedding, top_k=5, filter_dict=None):
         """
-        Searches Qdrant for the most similar vectors.
+        Search Qdrant for the most similar vectors.
 
-        Returns top_k most relevant chunks.
+        Supports filtering by document name, chunk type,
+        and other payload fields.
         """
 
         try:
 
-            # Build filter if doc_name is provided.
-            qdrant_filter = None
+            qdrant_filter = self._build_filter(
+                filter_dict
+            )
 
-            if filter_dict and "doc_name" in filter_dict:
-
-                val = filter_dict["doc_name"]
-
-                if isinstance(val, dict):
-                    doc_name = val.get("$eq")
-                else:
-                    doc_name = val
-
-                qdrant_filter = Filter(
-                    must=[
-                        FieldCondition(
-                            key="doc_name",
-                            match=MatchValue(value=doc_name)
-                        )
-                    ]
-                )
-
-            # Use query_points from latest qdrant-client.
             results = self.client.query_points(
                 collection_name=self.collection_name,
                 query=embedding,
@@ -244,28 +267,23 @@ class VectorStore:
 
             return [
                 {
-                    "text": hit.payload.get("text", ""),
+                    "text": (hit.payload or {}).get("text", ""),
                     "score": round(hit.score, 4),
                     "metadata": {
-                        k: v
-                        for k, v in hit.payload.items()
-                        if k != "text"
+                        key: value
+                        for key, value in (hit.payload or {}).items()
+                        if key != "text"
                     }
                 }
                 for hit in results.points
             ]
 
         except Exception as e:
-
             logger.error(f"Query failed: {e}")
             raise
 
     def delete_document(self, doc_name):
-        """
-        Deletes all vectors belonging to one document.
-
-        Used when re-uploading the same document.
-        """
+        """Delete all vectors belonging to one document."""
 
         try:
 
@@ -286,14 +304,11 @@ class VectorStore:
             )
 
         except Exception as e:
-
             logger.error(f"Delete failed: {e}")
             raise
 
     def get_stats(self):
-        """
-        Returns basic statistics about the Qdrant collection.
-        """
+        """Return basic Qdrant collection statistics."""
 
         try:
 
@@ -328,52 +343,57 @@ if __name__ == "__main__":
 
     vs = VectorStore()
 
-    stats = vs.get_stats()
+    try:
 
-    print(f"Collection : {stats['collection_name']}")
-    print(f"Dimensions : {stats['dimensions']}")
-    print(f"Vectors    : {stats['total_vectors']}")
+        stats = vs.get_stats()
 
-    # Test with fake vector of correct dimension.
-    fake_vector = [
-        random.uniform(-1, 1)
-        for _ in range(settings.EMBED_DIMENSIONS)
-    ]
+        print(f"Collection : {stats['collection_name']}")
+        print(f"Dimensions : {stats['dimensions']}")
+        print(f"Vectors    : {stats['total_vectors']}")
 
-    fake_chunk = [{
-        "id": "test_p1_c0",
-        "text": "TCS revenue was 2,25,458 crore in FY2023.",
-        "embedding": fake_vector,
-        "metadata": {
-            "doc_name": "test_doc",
-            "page_num": 1,
-            "section": "FINANCIAL HIGHLIGHTS",
-            "chunk_index": 0,
-            "word_count": 9
-        }
-    }]
+        fake_vector = [
+            random.uniform(-1, 1)
+            for _ in range(settings.EMBED_DIMENSIONS)
+        ]
 
-    count = vs.upsert_chunks(fake_chunk)
-
-    print(f"\nUpserted {count} test vector ✅")
-
-    results = vs.query(
-        fake_vector,
-        top_k=1,
-        filter_dict={
-            "doc_name": {
-                "$eq": "test_doc"
+        fake_chunk = [{
+            "id": "test_p1_c0",
+            "text": "Test financial document content.",
+            "embedding": fake_vector,
+            "metadata": {
+                "doc_name": "test_doc",
+                "page_num": 1,
+                "section": "TEST",
+                "chunk_index": 0,
+                "word_count": 5
             }
-        }
-    )
+        }]
 
-    print(f"Query returned {len(results)} result")
+        count = vs.upsert_chunks(fake_chunk)
 
-    if results:
-        print(f"Score : {results[0]['score']}")
-        print(f"Text  : {results[0]['text']}")
+        print(f"\nUpserted {count} test vector")
 
-    vs.delete_document("test_doc")
+        results = vs.query(
+            fake_vector,
+            top_k=1,
+            filter_dict={
+                "doc_name": {
+                    "$eq": "test_doc"
+                }
+            }
+        )
 
-    print("\nTest vector deleted ✅")
-    print("\nQdrant VectorStore working ✅")
+        print(f"Query returned {len(results)} result")
+
+        if results:
+            print(f"Score : {results[0]['score']}")
+            print(f"Text  : {results[0]['text']}")
+
+        vs.delete_document("test_doc")
+
+        print("\nTest vector deleted")
+        print("VectorStore test completed")
+
+    finally:
+        if vs.client is not None:
+            vs.client.close()
