@@ -17,6 +17,80 @@ class TableExtractor:
         4. Markdown conversion for downstream RAG.
     """
 
+    @staticmethod
+    def is_financial_table_candidate(page_text):
+        """
+        Detect financial statement pages using structural patterns.
+        Works on continuation pages even when the statement heading
+        is missing.
+        """
+
+        if not page_text:
+            return False
+
+        lines = page_text.splitlines()[:20]
+        text = " ".join(lines).lower()
+        text = re.sub(r"\s+", " ", text)
+
+        has_particulars = bool(
+            re.search(r"\bparticulars\b", text)
+        )
+
+        has_note = bool(
+            re.search(r"\bnote\b", text)
+        )
+
+        has_period = bool(
+            re.search(
+                r"(as at|year ended)\s+march\s+31",
+                text
+            )
+        )
+
+        years = set(
+            re.findall(r"\b(?:19|20)\d{2}\b", text)
+        )
+
+        has_two_years = len(years) >= 2
+
+        standard_financial_table = (
+            has_particulars
+            and has_note
+            and has_period
+            and has_two_years
+        )
+
+        equity_statement = (
+            "statement of changes in equity" in text
+            and has_particulars
+        )
+
+        return standard_financial_table or equity_statement
+
+    def detect_candidate_pages(self, pdf_path):
+        """
+        Scan a PDF and return physical page numbers that
+        appear to contain financial statement tables.
+        """
+
+        candidate_pages = []
+
+        with pdfplumber.open(pdf_path) as pdf:
+
+            for page_num, page in enumerate(pdf.pages, start=1):
+
+                page_text = page.extract_text() or ""
+
+                if self.is_financial_table_candidate(page_text):
+                    candidate_pages.append(page_num)
+
+        logger.info(
+            "Detected %s candidate financial table pages",
+            len(candidate_pages)
+        )
+
+        return candidate_pages
+
     def extract_tables(
         self,
         pdf_path,
@@ -45,9 +119,11 @@ class TableExtractor:
 
             total_pages = len(pdf.pages)
 
+            automatic_detection = pages is None
+
             page_numbers = (
                 range(1, total_pages + 1)
-                if pages is None
+                if automatic_detection
                 else pages
             )
 
@@ -64,6 +140,14 @@ class TableExtractor:
                 page = pdf.pages[page_num - 1]
 
                 page_text = page.extract_text() or ""
+
+                # Automatically skip pages that do not look like
+                # financial statement table pages.
+                if (
+                    automatic_detection
+                    and not self.is_financial_table_candidate(page_text)
+                ):
+                    continue
 
                 # Check whether this page has a coordinate profile.
                 if page_num in coordinate_configs:
