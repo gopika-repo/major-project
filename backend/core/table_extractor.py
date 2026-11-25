@@ -60,12 +60,9 @@ class TableExtractor:
             and has_two_years
         )
 
-        equity_statement = (
-            "statement of changes in equity" in text
-            and has_particulars
-        )
-
-        return standard_financial_table or equity_statement
+        # Equity statements are temporarily excluded because
+        # their multi-column layout needs a dedicated extractor.
+        return standard_financial_table
 
     def detect_candidate_pages(self, pdf_path):
         """

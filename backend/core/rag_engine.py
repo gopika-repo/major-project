@@ -77,7 +77,7 @@ class RAGEngine:
             table_chunks = []
             table_status = "not_requested"
 
-            if table_pages:
+            if table_pages is None or table_pages:
                 print("\nSTEP 3: Extracting financial tables...")
 
                 try:
@@ -147,7 +147,7 @@ class RAGEngine:
         self,
         pdf_path,
         doc_name,
-        pages,
+        pages=None,
         coordinate_configs=None
     ):
         """Add financial table vectors without reprocessing text."""
